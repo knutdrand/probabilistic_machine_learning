@@ -22,3 +22,9 @@ def scipy_wrapper(scipy_rv, is_discrete=False):
 
 
 Normal = scipy_wrapper(scipy.stats.norm)
+Beta = scipy_wrapper(scipy.stats.beta)
+Binomial = scipy_wrapper(scipy.stats.binom, is_discrete=True)
+
+
+class HalfCauchy:
+    pass

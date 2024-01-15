@@ -13,3 +13,12 @@ class DirectImportanceSampling:
         weights = np.exp(self.target_distribution.log_prob(samples) - self.proposal_distribution.log_prob(samples))
         f = function(samples)
         return np.mean(f * weights)
+
+
+class SelfNormalizedImportanceSampling(DirectImportanceSampling):
+    def E(self, function, n_samples=100):
+        samples = self.proposal_distribution.sample(n_samples)
+        weights = np.exp(self.target_distribution.log_prob(samples) - self.proposal_distribution.log_prob(samples))
+        f = function(samples)
+        return np.sum(f * weights) / np.sum(weights)
+
