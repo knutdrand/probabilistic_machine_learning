@@ -41,8 +41,8 @@ class BasicTS:
         true_states = [0.2]
         for i in range(self.T - 1):
             true_states.append(np.random.normal(true_states[-1] + self.beta, 1))
-        observed = np.random.normal(
-            true_states, 2)
+        observed = np.random.normal(true_states, 2)
+
         return observed
 
     def estimate(self, observed):
@@ -57,8 +57,37 @@ class BasicTS:
 
         return sample(logdensity, rng_key, {'beta': 0.0, 'states': np.zeros(self.T)}, num_samples=1_000)
 
+
+@dataclasses.dataclass
+class PoissonTS:
+    T: int
+    beta: float = 0.1
+
+    def sample(self):
+        true_states = [0.2]
+        for i in range(self.T - 1):
+            true_states.append(np.random.normal(true_states[-1] + self.beta, 1))
+        true_states = jnp.array(true_states)
+        observed = np.random.poisson(jnp.exp(true_states))
+
+        return observed
+
+    def estimate(self, observed):
+        def logdensity_fn(beta, states):
+            """Univariate Normal"""
+            state_logpdf = stats.norm.logpdf(states[1:], states[:-1] + beta, 1)
+            observed_logpdf = stats.poisson.logpmf(observed, jnp.exp(states))
+            return jnp.sum(state_logpdf) + jnp.sum(observed_logpdf)
+
+        logdensity = lambda x: logdensity_fn(**x)
+        rng_key = jax.random.key(1000)
+
+        return sample(logdensity, rng_key, {'beta': 0.0, 'states': np.zeros(self.T)}, num_samples=1_000)
+
+
+
 def test_time_series_jax():
-    model = BasicTS(100)
+    model = PoissonTS(100)
     observed = model.sample()
     samples = model.estimate(observed)
     plt.hist(samples['beta']); plt.show()
