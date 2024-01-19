@@ -1,3 +1,5 @@
+import dataclasses
+
 from probabilistic_machine_learning.adaptors.jax_adaptor import JaxWrap
 from probabilistic_machine_learning.adaptors.jax_nuts import sample
 from .fixtures import *
@@ -29,33 +31,37 @@ def test_simple_jax():
     rng_key = jax.random.key(1000)
     samples = sample(logdensity, rng_key, {'loc': 0.0, 'log_scale': 0.0}, num_samples=1_000)
 
+
+@dataclasses.dataclass
+class BasicTS:
+    T: int
+    beta: float = 2.
+
+    def sample(self):
+        true_states = [0.2]
+        for i in range(self.T - 1):
+            true_states.append(np.random.normal(true_states[-1] + self.beta, 1))
+        observed = np.random.normal(
+            true_states, 2)
+        return observed
+
+    def estimate(self, observed):
+        def logdensity_fn(beta, states):
+            """Univariate Normal"""
+            state_logpdf = stats.norm.logpdf(states[1:], states[:-1] + beta, 1)
+            observed_logpdf = stats.norm.logpdf(observed, states, 2)
+            return jnp.sum(state_logpdf) + jnp.sum(observed_logpdf)
+
+        logdensity = lambda x: logdensity_fn(**x)
+        rng_key = jax.random.key(1000)
+
+        return sample(logdensity, rng_key, {'beta': 0.0, 'states': np.zeros(self.T)}, num_samples=1_000)
+
 def test_time_series_jax():
-    true_states = [0.2]
-    beta = 2
-    T = 100
-    for i in range(T-1):
-        true_states.append(np.random.normal(true_states[-1] + beta, 1))
-    true_states = np.array(true_states)
-    observed = np.random.normal(true_states, 2)
-    def logdensity_fn(beta, states):
-        """Univariate Normal"""
-        state_logpdf = stats.norm.logpdf(states[1:], states[:-1]+beta, 1)
-        observed_logpdf = stats.norm.logpdf(observed, states, 2)
-        return jnp.sum(state_logpdf)+jnp.sum(observed_logpdf)
-
-    logdensity = lambda x: logdensity_fn(**x)
-    rng_key = jax.random.key(1000)
-
-    samples = sample(logdensity, rng_key, {'beta': 0.0, 'states': np.zeros(T)}, num_samples=1_000)
+    model = BasicTS(100)
+    observed = model.sample()
+    samples = model.estimate(observed)
     plt.hist(samples['beta']); plt.show()
-
-
-
-
-
-
-
-
 
 def test_get_jax_model(numpy_data_1, example_1):
     x, y = numpy_data_1
