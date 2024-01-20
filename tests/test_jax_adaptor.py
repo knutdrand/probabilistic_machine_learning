@@ -3,6 +3,7 @@ import dataclasses
 from probabilistic_machine_learning.adaptors.jax_adaptor import JaxWrap
 from probabilistic_machine_learning.adaptors.jax_nuts import sample
 from .fixtures import *
+from .jax_models import RealTS
 from .models import Models
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,9 +11,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import jax.scipy.stats as stats
-
-import blackjax
-
+expit = lambda x: 1/(1+jnp.exp(-x))
 _wrap = JaxWrap()
 
 models = Models(_wrap)
@@ -33,64 +32,43 @@ def test_simple_jax():
 
 
 @dataclasses.dataclass
-class BasicTS:
-    T: int
-    beta: float = 2.
-
+class MosquitoRegression:
+    T = 400
+    total_population: int=1000.
+    n_mosquitos = (np.arange(T) % 12)*1.2+1
+    n_infected = ((5*np.arange(T)) % 12)*1.2+1
+    double_bite_rate = 0.1
     def sample(self):
-        true_states = [0.2]
-        for i in range(self.T - 1):
-            true_states.append(np.random.normal(true_states[-1] + self.beta, 1))
-        observed = np.random.normal(true_states, 2)
-
-        return observed
+        mu = self.n_mosquitos * self.double_bite_rate * self.n_infected/self.total_population*(1-self.n_infected/self.total_population)
+        return np.random.poisson(mu)
 
     def estimate(self, observed):
-        def logdensity_fn(beta, states):
-            """Univariate Normal"""
-            state_logpdf = stats.norm.logpdf(states[1:], states[:-1] + beta, 1)
-            observed_logpdf = stats.norm.logpdf(observed, states, 2)
-            return jnp.sum(state_logpdf) + jnp.sum(observed_logpdf)
+        n_mosquitos = self.n_mosquitos
+        n_infected = self.n_infected
+        total_population = self.total_population
 
+        def logdensity_fn(lo_double_bite_rate, n_mosquitos=n_mosquitos, n_infected=n_infected, total_population=total_population, observed=observed):
+            """Univariate Normal"""
+            # expit = jax.scipy.special.expit
+            expit = lambda x: 1/(1+jnp.exp(-x))
+            double_bite_rate = expit(lo_double_bite_rate)
+            mu = n_mosquitos * double_bite_rate * n_infected / total_population * (1 - n_infected / total_population)
+            logpdf = stats.poisson.logpmf(observed, mu)
+            return jnp.sum(logpdf)
+        print(jax.grad(logdensity_fn)(0.0))
         logdensity = lambda x: logdensity_fn(**x)
         rng_key = jax.random.key(1000)
 
-        return sample(logdensity, rng_key, {'beta': 0.0, 'states': np.zeros(self.T)}, num_samples=1_000)
+        return sample(logdensity, rng_key, {'lo_double_bite_rate': 0.0}, num_samples=1_000)
 
 
-@dataclasses.dataclass
-class PoissonTS:
-    T: int
-    beta: float = 0.1
-
-    def sample(self):
-        true_states = [0.2]
-        for i in range(self.T - 1):
-            true_states.append(np.random.normal(true_states[-1] + self.beta, 1))
-        true_states = jnp.array(true_states)
-        observed = np.random.poisson(jnp.exp(true_states))
-
-        return observed
-
-    def estimate(self, observed):
-        def logdensity_fn(beta, states):
-            """Univariate Normal"""
-            state_logpdf = stats.norm.logpdf(states[1:], states[:-1] + beta, 1)
-            observed_logpdf = stats.poisson.logpmf(observed, jnp.exp(states))
-            return jnp.sum(state_logpdf) + jnp.sum(observed_logpdf)
-
-        logdensity = lambda x: logdensity_fn(**x)
-        rng_key = jax.random.key(1000)
-
-        return sample(logdensity, rng_key, {'beta': 0.0, 'states': np.zeros(self.T)}, num_samples=1_000)
-
-
-
-def test_time_series_jax():
-    model = PoissonTS(100)
+@pytest.mark.parametrize('model', [MosquitoRegression()]) #, RealTS()])#, BasicTS(100), PoissonTS(100)])
+def test_time_series_jax(model):
+    # model = PoissonTS(100)
+    np.random.seed(100)
     observed = model.sample()
     samples = model.estimate(observed)
-    plt.hist(samples['beta']); plt.show()
+    plt.hist(expit(samples['lo_double_bite_rate'])); plt.show()
 
 def test_get_jax_model(numpy_data_1, example_1):
     x, y = numpy_data_1
