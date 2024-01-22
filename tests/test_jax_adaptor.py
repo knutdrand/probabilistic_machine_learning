@@ -119,13 +119,77 @@ class MosquitoTS:
         observed = []
         for i in range(self.T):
             mu = self.get_mu(self.double_bite_rate, n_infected[-1], self.n_mosquitos[i])
+
             eta = np.random.normal(mu, self.p_sigma)
-            new_infections = expit(eta)*self.total_population
+            n_susc = self.total_population - n_infected[-1]
+            new_infections = expit(eta)*n_susc  # self.total_population
             n_infected.append(n_infected[-1] * (1-self.loss_rate) + new_infections)
-            o = np.random.poisson(new_infections)
             observed.append(new_infections)
         observed = np.array(observed)
         assert observed.shape == (self.T,)
+        plt.plot(observed)
+        plt.plot(n_infected)
+        plt.show()
+        return observed
+
+    def get_mu(self, rate, n_infected, n_mosquitos):
+        n_bits = n_mosquitos * rate * n_infected / self.total_population
+        p = (1 - ((self.total_population - 1) / self.total_population) ** n_bits)
+        mu = jax.scipy.special.logit(p)
+        return mu
+
+    def estimate(self, observed):
+        n_infected = [self.init_infected]
+        print(observed.shape)
+        for o in observed[:-1]:
+            n_infected.append(float(n_infected[-1] * (1-self.loss_rate) + o))
+        n_infected = np.array(n_infected)
+        def logdensity_fn(lo_double_bite_rate):#, log_odds_infected_rate):
+            """Univariate Normal"""
+            double_bite_rate = jnp.exp(lo_double_bite_rate)
+            mu = self.get_mu(double_bite_rate, n_infected, self.n_mosquitos)
+            n_susc = self.total_population - n_infected
+            eta = jax.scipy.special.logit(observed/n_susc)# self.total_population)
+            logpdf = stats.norm.logpdf(eta, mu, self.p_sigma)
+            return logpdf
+
+        logdensity = lambda x: jnp.sum(logdensity_fn(**x))
+        rng_key = jax.random.key(1000)
+
+        initial_position = {'lo_double_bite_rate': 0.0} #, 'log_odds_infected_rate': np.arange(self.T) + 0.5}
+
+        return sample(logdensity, rng_key,
+                      initial_position
+                      , num_samples=1_000)
+
+
+@dataclasses.dataclass
+class MosquitoTS2:
+    T = 400
+    total_population: int = 10000.
+    n_mosquitos = (100*(np.arange(T) % 12)) * 1.2 + 1
+    # n_infected = ((100 * (1+(np.arange(T) % 12)))) * 2 + 1
+    init_infected = 100
+    double_bite_rate = 10
+    p_sigma = 1.0
+    loss_rate = 0.1
+
+    def sample(self):
+        n_infected = [self.init_infected]
+        observed = []
+        for i in range(self.T):
+            mu = self.get_mu(self.double_bite_rate, n_infected[-1], self.n_mosquitos[i])
+            eta = np.random.normal(mu, self.p_sigma)
+            n_susc = self.total_population - n_infected[-1]
+            new_infections = expit(eta)*n_susc
+            n_infected.append(n_infected[-1] * (1-self.loss_rate) + new_infections)
+            o = np.random.poisson(new_infections)
+            observed.append(o)
+        observed = np.array(observed)
+        assert observed.shape == (self.T,)
+        plt.plot(observed)
+        plt.plot(n_infected)
+        plt.show()
         return observed
 
     def get_mu(self, rate, n_infected, n_mosquitos):
@@ -141,23 +205,24 @@ class MosquitoTS:
             print(o)
             n_infected.append(float(n_infected[-1] * (1-self.loss_rate) + o))
         n_infected = np.array(n_infected)
-        def logdensity_fn(lo_double_bite_rate):#, log_odds_infected_rate):
-            """Univariate Normal"""
-            #diffs = observed
-            # S, f*S+o_0, f(f*S+o_0)+o_1, f(f(f*S+o_0)+o_1)+o_2
-            # S + f*o_0, ff*S + f*o_0 + o_1, f*f*S + f*f*o_0 + f*o_1 + o_2
-            #n_infected = expit(log_odds_infected_rate)*self.total_population
-            #n_infected = expit(log_odds_infected_rate)*self.total_population
-            double_bite_rate = jnp.exp(lo_double_bite_rate)
-            mu = self.get_mu(double_bite_rate, n_infected, self.n_mosquitos)
-            eta = jax.scipy.special.logit(observed/self.total_population)
-            logpdf = stats.norm.logpdf(eta, mu, self.p_sigma)
-            return logpdf
 
-        logdensity = lambda x: jnp.sum(logdensity_fn(**x))
+        def logdensity_fn(lo_double_bite_rate, log_odds_newly_infected):
+            """Univariate Normal"""
+            n_infected = expit(log_odds_infected_rate)*self.total_population
+            n_infected = jnp.insert(n_infected, 0, self.init_infected)
+            new_infections = n_infected[1:]-n_infected[:-1]*(1-self.loss_rate)
+            n_susc = self.total_population - n_infected[:-1]
+            double_bite_rate = jnp.exp(lo_double_bite_rate)
+            mu = self.get_mu(double_bite_rate, n_infected[:-1], self.n_mosquitos)
+            observed_logpdf = stats.poisson.logpmf(observed, new_infections)
+            eta = jax.scipy.special.logit(new_infections/n_susc)
+            logpdf = stats.norm.logpdf(eta, mu, self.p_sigma)
+            return logpdf.sum() + observed_logpdf.sum()
+
+        logdensity = lambda x: logdensity_fn(**x)
         rng_key = jax.random.key(1000)
 
-        initial_position = {'lo_double_bite_rate': 0.0} #, 'log_odds_infected_rate': np.arange(self.T) + 0.5}
+        initial_position = {'lo_double_bite_rate': 0.0, 'log_odds_infected_rate': np.arange(self.T) + 0.5}
 
         return sample(logdensity, rng_key,
                       initial_position
@@ -165,13 +230,14 @@ class MosquitoTS:
 
 
 
-@pytest.mark.parametrize('model', [MosquitoTS(), MosquitoRegression2()])  # , RealTS()])#, BasicTS(100), PoissonTS(100)])
+@pytest.mark.parametrize('model', [MosquitoTS2()])
 def test_time_series_jax(model):
     # model = PoissonTS(100)
     np.random.seed(100)
     observed = model.sample()
     samples = model.estimate(observed)
-    plt.hist(expit(samples['lo_double_bite_rate']))
+    print(samples['lo_double_bite_rate'])
+    plt.hist(np.exp(samples['lo_double_bite_rate']))
     plt.show()
 
 
