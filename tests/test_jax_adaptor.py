@@ -126,7 +126,9 @@ class MosquitoTS:
             n_infected.append(n_infected[-1] * (1-self.loss_rate) + new_infections)
             observed.append(new_infections)
         observed = np.array(observed)
+        n_infected = np.array(n_infected)
         assert observed.shape == (self.T,)
+        assert observed.shape == (self.T+1,)
         plt.plot(observed)
         plt.plot(n_infected)
         plt.show()
@@ -163,6 +165,10 @@ class MosquitoTS:
                       , num_samples=1_000)
 
 
+def logit(x):
+    return jax.scipy.special.logit(x)
+
+
 @dataclasses.dataclass
 class MosquitoTS2:
     T = 400
@@ -178,12 +184,14 @@ class MosquitoTS2:
         n_infected = [self.init_infected]
         observed = []
         for i in range(self.T):
-            mu = self.get_mu(self.double_bite_rate, n_infected[-1], self.n_mosquitos[i])
-            eta = np.random.normal(mu, self.p_sigma)
-            n_susc = self.total_population - n_infected[-1]
-            new_infections = expit(eta)*n_susc
-            n_infected.append(n_infected[-1] * (1-self.loss_rate) + new_infections)
-            o = np.random.poisson(new_infections)
+            cur_rate = n_infected[-1]/self.total_population
+            p = self.get_p(self.double_bite_rate, n_infected[-1], self.n_mosquitos[i])
+            new_mu = cur_rate*(1-self.loss_rate) + p*(1-cur_rate)
+            eta = np.random.normal(logit(new_mu), self.p_sigma)
+            new_rate = expit(eta)
+            new_infections = (new_rate-cur_rate)*self.total_population  # self.total_population
+            n_infected.append(new_rate*self.total_population)
+            o = np.random.normal(new_infections, 10)
             observed.append(o)
         observed = np.array(observed)
         assert observed.shape == (self.T,)
@@ -193,10 +201,14 @@ class MosquitoTS2:
         return observed
 
     def get_mu(self, rate, n_infected, n_mosquitos):
-        n_bits = n_mosquitos * rate * n_infected / self.total_population
-        p = (1 - ((self.total_population - 1) / self.total_population) ** n_bits)
+        p = self.get_p(n_infected, n_mosquitos, rate)
         mu = jax.scipy.special.logit(p)
         return mu
+
+    def get_p(self, n_infected, n_mosquitos, rate):
+        n_bits = n_mosquitos * rate * n_infected / self.total_population
+        p = (1 - ((self.total_population - 1) / self.total_population) ** n_bits)
+        return p
 
     def estimate(self, observed):
         n_infected = [self.init_infected]
@@ -206,23 +218,32 @@ class MosquitoTS2:
             n_infected.append(float(n_infected[-1] * (1-self.loss_rate) + o))
         n_infected = np.array(n_infected)
 
-        def logdensity_fn(lo_double_bite_rate, log_odds_newly_infected):
-            """Univariate Normal"""
+        def get_n_infected(log_odds_states):
+            ps = expit(log_odds_states)
+            rates = [self.init_infected/self.total_population]
+            for p in ps:
+                rates.append(
+                    (1-p)*rates[-1]+p-self.loss_rate*rates[-1])
+            return jnp.array(rates)*self.total_population
+
+        def logdensity_fn(lo_double_bite_rate, log_odds_infected_rate):
+            """Univariate Normal
+            """
             n_infected = expit(log_odds_infected_rate)*self.total_population
             n_infected = jnp.insert(n_infected, 0, self.init_infected)
-            new_infections = n_infected[1:]-n_infected[:-1]*(1-self.loss_rate)
-            n_susc = self.total_population - n_infected[:-1]
+            new_infections = n_infected[1:]-n_infected[:-1]
             double_bite_rate = jnp.exp(lo_double_bite_rate)
-            mu = self.get_mu(double_bite_rate, n_infected[:-1], self.n_mosquitos)
-            observed_logpdf = stats.poisson.logpmf(observed, new_infections)
-            eta = jax.scipy.special.logit(new_infections/n_susc)
-            logpdf = stats.norm.logpdf(eta, mu, self.p_sigma)
-            return logpdf.sum() + observed_logpdf.sum()
+            cur_rate = n_infected[:-1] / self.total_population
+            p = self.get_p(double_bite_rate, n_infected[:-1], self.n_mosquitos)
+            new_mu = cur_rate*(1-self.loss_rate) + p*(1-cur_rate)
+            state_logpdf = stats.norm.logpdf(log_odds_infected_rate, logit(new_mu), self.p_sigma)
+            observed_logpdf = stats.norm.logpdf(observed, new_infections, 10)
+            return state_logpdf.sum() + observed_logpdf.sum()
 
         logdensity = lambda x: logdensity_fn(**x)
         rng_key = jax.random.key(1000)
 
-        initial_position = {'lo_double_bite_rate': 0.0, 'log_odds_infected_rate': np.arange(self.T) + 0.5}
+        initial_position = {'lo_double_bite_rate': 0.0, 'log_odds_infected_rate': (np.arange(self.T) + 0.5) % 7}
 
         return sample(logdensity, rng_key,
                       initial_position
@@ -237,6 +258,8 @@ def test_time_series_jax(model):
     observed = model.sample()
     samples = model.estimate(observed)
     print(samples['lo_double_bite_rate'])
+    plt.plot(np.exp(samples['lo_double_bite_rate']))
+    plt.show()
     plt.hist(np.exp(samples['lo_double_bite_rate']))
     plt.show()
 
