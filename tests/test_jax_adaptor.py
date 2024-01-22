@@ -122,9 +122,11 @@ class MosquitoTS:
             eta = np.random.normal(mu, self.p_sigma)
             new_infections = expit(eta)*self.total_population
             n_infected.append(n_infected[-1] * (1-self.loss_rate) + new_infections)
+            o = np.random.poisson(new_infections)
             observed.append(new_infections)
-
-        return np.array(observed)
+        observed = np.array(observed)
+        assert observed.shape == (self.T,)
+        return observed
 
     def get_mu(self, rate, n_infected, n_mosquitos):
         n_bits = n_mosquitos * rate * n_infected / self.total_population
@@ -134,8 +136,10 @@ class MosquitoTS:
 
     def estimate(self, observed):
         n_infected = [self.init_infected]
+        print(observed.shape)
         for o in observed[:-1]:
-            n_infected.append(n_infected[-1] * (1-self.loss_rate) + o)
+            print(o)
+            n_infected.append(float(n_infected[-1] * (1-self.loss_rate) + o))
         n_infected = np.array(n_infected)
         def logdensity_fn(lo_double_bite_rate):#, log_odds_infected_rate):
             """Univariate Normal"""
