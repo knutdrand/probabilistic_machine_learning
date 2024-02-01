@@ -1,5 +1,9 @@
 import operator
 
+from probabilistic_machine_learning.adaptors.event import Event
+from probabilistic_machine_learning.graph_objects import GraphObject
+
+
 #from .pymc_adaptor import get_pymc_model
 
 
@@ -12,12 +16,6 @@ class DistWrap:
 
     def __call__(self, *args, **kwargs):
         return get_pymc_model(self.name, *args, **kwargs)
-
-
-class Event:
-    def __init__(self, variable, value):
-        self.variable = variable
-        self.value = value
 
 
 class Variable:
@@ -42,7 +40,7 @@ class Distribution(Variable):
 
 
 def dist_wrap(name):
-    class NewClass(Distribution):
+    class NewClass(Distribution, GraphObject):
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
