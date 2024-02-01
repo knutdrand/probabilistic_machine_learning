@@ -1,6 +1,9 @@
 import numpy as np
 from oryx import core
 from dataclasses import dataclass
+
+import jax
+
 from .adaptors.base_adaptor import Distribution
 from .adaptors.event import Event
 from typing import Tuple, Union
@@ -20,13 +23,23 @@ def given(*events):
 
 class Graph:
 
-    def __init__(self, events, given_events=None):
+    def __init__(self, events, given_events=None, variables=None):
         self.events = events
         self.given_events = given_events if given_events is not None else []
+        self._variables = variables
         self._realized_variables = {id(event.variable) for event in events}
         self._realized_variables |= {id(event.variable) for event in given_events}
         self._realizations = {id(event.variable): event.value for event in events}
         self._realizations |= {id(event.variable): event.value for event in given_events}
+        self._seed = jax.random.PRNGKey(12345)
+
+    def sample(self, variables, shape=()):
+        return tuple(self._sample(variable, shape) for variable in variables)
+
+
+    @classmethod
+    def from_variables(cls, variables):
+        return cls([], [], variables)
 
     @classmethod
     def from_events(cls, events, given_events=None):
@@ -40,8 +53,11 @@ class Graph:
         value = event.value
         if isinstance(variable, FunctionNode):
             variable, value = self._get_inverse(variable, value)
-        dist = getattr(dist_backend, type(variable).__name__)(*variable.args, **variable.kwargs)
+        dist = self.get_dist(variable)(*variable.args, **variable.kwargs)
         return dist.log_prob(value)
+
+    def get_dist(self, variable):
+        return getattr(dist_backend, type(variable).__name__)
 
     def _get_inverse(self, variable: FunctionNode, value):
         transformation, root_distribution = self._get_transformation(variable)
@@ -68,6 +84,10 @@ class Graph:
             if len(roots) > 1:
                 raise ValueError('Multiple root distributions found.')
             return roots[0] if roots else None
+
+    def realize(self, variable, value):
+        self._realized_variables.add(id(variable))
+        self._realizations[id(variable)] = value
 
     def _resolve_distribution(self, distribution: Distribution):
         args = [self._get_transformation_or_realization(arg, distribution) for arg in distribution.args]
@@ -98,6 +118,26 @@ class Graph:
     def _get_realization(self, variable):
         return self._realizations[id(variable)]
 
+    def _sample(self, variable: GraphObject, shape=())-> np.ndarray:
+        if isinstance(variable, FunctionNode):
+            args = [self._sample(arg, shape) for arg in variable.args]
+            kwargs = {key: self._sample(value, shape) for key, value in variable.kwargs.items()}
+            return variable.func(*args, **kwargs)
+        elif isinstance(variable, Distribution):
+            if self._is_realized(variable):
+                return self._get_realization(variable)
+            sampled_args = [self._sample(arg, shape) for arg in variable.args]
+            sampled_kwargs = {key: self._sample(value, shape) for key, value in variable.kwargs.items()}
+            self._seed, new_seed = jax.random.split(self._seed)
+            #is_basal = all(not self._is_realized(arg) for arg in variable.args) and all(not self._is_realized(value) for value in variable.kwargs.values())
+            dist = self.get_dist(variable)(*sampled_args, **sampled_kwargs)
+            sample_shape = () if shape == dist.batch_shape else shape
+            result = dist.sample(sample_shape=sample_shape, seed=new_seed)
+            self.realize(variable, result)
+            return result
+        elif not isinstance(variable, GraphObject):
+            return variable
+
 
 def logprob(*events):
     true_events = [event for event in events if isinstance(event, Event)]
@@ -106,3 +146,7 @@ def logprob(*events):
     graph = Graph.from_events(true_events, given_events)
     return graph.calculate_logprob()
 
+
+def sample(*variables, shape=()):
+    graph = Graph.from_variables(variables)
+    return graph.sample(variables, shape)

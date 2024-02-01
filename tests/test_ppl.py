@@ -1,9 +1,10 @@
 import numpy as np
 import pytest
 import scipy.stats
+from matplotlib import pyplot as plt
 from scipy.special import logit, expit
 from probabilistic_machine_learning.adaptors.base_adaptor import ModuleWrap
-from probabilistic_machine_learning.ppl import logprob, given
+from probabilistic_machine_learning.ppl import logprob, given, sample
 
 dists = ModuleWrap()
 
@@ -58,31 +59,56 @@ def transition_model(state, mosquito_state, alpha, beta, temp):
 
 
 def test_simpele_logprob():
-    alpha, beta = 2., 3.
-    S = 0.3
-    rate = expit(dists.Normal(alpha + beta * 2, 1))
-    newS = S*(1-rate)
-    event = newS == 0.2
+    S, alpha, beta, event, newS = model_1()
     lp = logprob(event)
     true_lp = scipy.stats.norm.logpdf(logit(-(0.2/S-1)), alpha + beta * 2)
     assert np.allclose(lp, true_lp)
 
+
+def model_1():
+    alpha, beta = 2., 3.
+    S = 0.3
+    rate = expit(dists.Normal(alpha + beta * 2, 1))
+    newS = S * (1 - rate)
+    event = newS == 0.2
+    return S, alpha, beta, event, newS
+
+@pytest.mark.parametrize('model', [model_1])
+def test_sample(model):
+    S, alpha, beta, event, newS = model()
+    sampled = sample(newS, shape=(1000,))
+    sampled_S = sampled[0]
+    assert sampled_S.shape == (1000,)
+    plt.hist(sampled_S, bins=100);plt.show()
+
+
+def test_sample_adc():
+    M, S, alpha, beta, m_alpha, m_beta, new_M, new_S, temp = model_2()
+    sampled = sample(new_M, new_S, shape=(1000,))
+    sampled_M = sampled[0]
+    sampled_S = sampled[1]
+    assert sampled_M.shape == (1000,)
+    assert sampled_S.shape == (1000,)
+
 #@pytest.mark.xfail
 def test_logprob():
-    alpha, beta = 1., 1.
-    m_alpha, m_beta = 1., 1.
-    temp = 20
-    S = dists.Beta(1, 1)
-    M = dists.Gamma(3, 3)
-    # S = 0.5
-    # M = 0.5
-    rate = expit(dists.Normal(alpha+beta*M, 1.))
-    new_S = S*(1-rate)
-    new_M = np.exp(dists.Normal(M+m_alpha+m_beta*temp, 1.))
+    M, S, alpha, beta, m_alpha, m_beta, new_M, new_S, temp = model_2()
     lp = logprob(new_S==0.2, new_M==10., given(S==0.5, M==0.5))
     S = 0.5
     M = 0.5
     true_lp_s = scipy.stats.norm.logpdf(logit(-(0.2/S-1)), alpha + beta * M)
     true_lp_m = scipy.stats.norm.logpdf(np.log(10.), 0.5+m_alpha + m_beta * temp)
     assert np.allclose(lp, true_lp_s+true_lp_m)
+
+
+def model_2():
+    alpha, beta = 1., 1.
+    m_alpha, m_beta = 1., 1.
+    temp = 20
+    S = dists.Beta(1, 1)
+    M = dists.Gamma(3, 3)
+    rate = expit(dists.Normal(alpha + beta * M, 1.))
+    new_S = S * (1 - rate)
+    new_M = np.exp(dists.Normal(M + m_alpha + m_beta * temp, 1.))
+    return M, S, alpha, beta, m_alpha, m_beta, new_M, new_S, temp
 
