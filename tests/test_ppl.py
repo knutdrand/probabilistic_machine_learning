@@ -3,7 +3,7 @@ import pytest
 import scipy.stats
 from scipy.special import logit, expit
 from probabilistic_machine_learning.adaptors.base_adaptor import ModuleWrap
-from probabilistic_machine_learning.ppl import logprob
+from probabilistic_machine_learning.ppl import logprob, given
 
 dists = ModuleWrap()
 
@@ -67,18 +67,22 @@ def test_simpele_logprob():
     true_lp = scipy.stats.norm.logpdf(logit(-(0.2/S-1)), alpha + beta * 2)
     assert np.allclose(lp, true_lp)
 
-
-@pytest.mark.xfail
+#@pytest.mark.xfail
 def test_logprob():
     alpha, beta = 1., 1.
     m_alpha, m_beta = 1., 1.
     temp = 20
     S = dists.Beta(1, 1)
     M = dists.Gamma(3, 3)
-    rate = expit(dists.Normal(alpha+beta*M))
-    new_S = S(1-rate)
-    new_M = expit(dists.Normal(M+m_alpha+m_beta*temp))
-    lp = logprob(new_S, new_M, given(S==0.5, M==0.5))
-
-
+    # S = 0.5
+    # M = 0.5
+    rate = expit(dists.Normal(alpha+beta*M, 1.))
+    new_S = S*(1-rate)
+    new_M = np.exp(dists.Normal(M+m_alpha+m_beta*temp, 1.))
+    lp = logprob(new_S==0.2, new_M==10., given(S==0.5, M==0.5))
+    S = 0.5
+    M = 0.5
+    true_lp_s = scipy.stats.norm.logpdf(logit(-(0.2/S-1)), alpha + beta * M)
+    true_lp_m = scipy.stats.norm.logpdf(np.log(10.), 0.5+m_alpha + m_beta * temp)
+    assert np.allclose(lp, true_lp_s+true_lp_m)
 

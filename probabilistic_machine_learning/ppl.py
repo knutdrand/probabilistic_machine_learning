@@ -15,19 +15,22 @@ class Given:
 
 
 def given(*events):
-    return events
+    return Given(events)
 
 
 class Graph:
 
-    def __init__(self, events):
+    def __init__(self, events, given_events=None):
         self.events = events
+        self.given_events = given_events if given_events is not None else []
         self._realized_variables = {id(event.variable) for event in events}
+        self._realized_variables |= {id(event.variable) for event in given_events}
         self._realizations = {id(event.variable): event.value for event in events}
+        self._realizations |= {id(event.variable): event.value for event in given_events}
 
     @classmethod
-    def from_events(cls, events):
-        return cls(events)
+    def from_events(cls, events, given_events=None):
+        return cls(events, given_events)
 
     def calculate_logprob(self):
         return sum(self._logprob(event) for event in self.events)
@@ -42,6 +45,7 @@ class Graph:
 
     def _get_inverse(self, variable: FunctionNode, value):
         transformation, root_distribution = self._get_transformation(variable)
+        assert isinstance(root_distribution, Distribution), root_distribution
         inverse_transformation = core.inverse(transformation)
         return root_distribution, inverse_transformation(value)
 
@@ -57,13 +61,18 @@ class Graph:
         if self._is_realized(variable) and not base:
             return None
         if isinstance(variable, Distribution):
-            return variable
+            return self._resolve_distribution(variable)
         elif isinstance(variable, FunctionNode):
             roots = [self._find_root_distribution(parent) for parent in self._get_parents(variable)]
             roots = [root for root in roots if root is not None]
             if len(roots) > 1:
                 raise ValueError('Multiple root distributions found.')
             return roots[0] if roots else None
+
+    def _resolve_distribution(self, distribution: Distribution):
+        args = [self._get_transformation_or_realization(arg, distribution) for arg in distribution.args]
+        kwargs = {key: self._get_transformation_or_realization(value, distribution) for key, value in distribution.kwargs.items()}
+        return distribution.__class__(*args, **kwargs)
 
     def _is_realized(self, variable):
         return id(variable) in self._realized_variables
@@ -79,17 +88,21 @@ class Graph:
             kwargs = {key: self._get_transformation_or_realization(value, root_distriubtion) for key, value in variable.kwargs.items()}
             new_node = FunctionNode(variable.func, *args, **kwargs)
             return new_node.unary_func
-        elif variable is root_distriubtion:
+        elif isinstance(variable, Distribution):
             return lambda x: x
         elif not isinstance(variable, GraphObject):
             return variable
-        raise ValueError(f'Variable {variable} is not realized and is not a function node and is not root distributions {root_distriubtion}')
+        raise ValueError(
+            f'Variable {variable} is not realized and is not a function node and is not root distributions {root_distriubtion}')
 
     def _get_realization(self, variable):
         return self._realizations[id(variable)]
 
 
 def logprob(*events):
-    graph = Graph.from_events(events)
+    true_events = [event for event in events if isinstance(event, Event)]
+    given_events = [event for event in events if isinstance(event, Given)]
+    given_events = [e for ge in given_events for e in ge.events]
+    graph = Graph.from_events(true_events, given_events)
     return graph.calculate_logprob()
 

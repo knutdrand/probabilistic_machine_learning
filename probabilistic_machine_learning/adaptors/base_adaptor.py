@@ -45,11 +45,11 @@ def dist_wrap(name):
             self.args = args
             self.kwargs = kwargs
 
-        def __mul__(self, other):
-            return self._ufunc(operator.mul, other)
+        #def __mul__(self, other):
+        #    return self._ufunc(operator.mul, other)
 
-        def __add__(self, other):
-            return self._ufunc(operator.add, other)
+        #def __add__(self, other):
+        #    return self._ufunc(operator.add, other)
 
         def _ufunc(self, ufunc, other):
             return CombinedVariable(ufunc, self, other)

@@ -57,4 +57,5 @@ class FunctionNode(GraphObject):
         elif arg_keys:
             variable_key = arg_keys[0]
             return lambda x: self.func(*self.args, **{key: (value if key!=variable_key else value(x)) for key, value in self.kwargs.items()})
-
+        else:
+            return self.func(*self.args, **self.kwargs)
