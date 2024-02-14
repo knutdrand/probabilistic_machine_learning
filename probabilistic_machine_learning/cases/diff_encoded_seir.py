@@ -31,6 +31,10 @@ def plot_sigmoid():
     plt.legend()
     plt.show()
 
+def scan_transition(state, logits):
+    diffs = state * expit(logits)
+    new_state = state - diffs + jnp.roll(diffs, 1)
+    return new_state, new_state[1:3]
 
 def model(beta, gamma, a, mu, scale, reporting_rate):
     init_state = [0.9, 0.08, 0.01, 0.01]
@@ -52,10 +56,7 @@ def model(beta, gamma, a, mu, scale, reporting_rate):
         diffs = [s * expit(p) for s, p in zip(state, logits)]
         return [state[i] - diffs[i] + diffs[i - 1] for i in range(4)]
 
-    def scan_transition(state, logits):
-        diffs = state*expit(logits)
-        new_state = state - diffs + jnp.roll(diffs, 1)
-        return new_state, new_state[1:3]
+
 
     def sample(T):
         state = init_state
@@ -67,20 +68,12 @@ def model(beta, gamma, a, mu, scale, reporting_rate):
         return s_stats.poisson(np.array(I)*reporting_rate).rvs()
         # return jnp.array(states)
 
-    def log_prob(observed, logits_array, beta):
-        state = init_state
-        E = []
-        I = []
+    def log_prob(observed, logits_array, lo_gamma, lo_a, lo_mu):
         E, I = jax.lax.scan(scan_transition, jnp.array(init_state), logits_array)[1].T
-        # for logits in logits_array:
-        #     E.append(state[1])
-        #     state = apply_diffs(logits, state)
-        #     I.append(state[2])
         state_pdf = sum(stats.logistic.logpdf(column, param, scale).sum()
                         for column, param in zip(logits_array.T,
-                                                 [beta * E,
-                                lo_gamma, lo_a, lo_mu]))
-        return state_pdf + stats.poisson.logpmf(observed, I)*reporting_rate).sum()
+                                                 [beta * E, lo_gamma, lo_a, lo_mu]))
+        return state_pdf + stats.poisson.logpmf(observed, I*reporting_rate).sum()
 
     return sample, lambda observed: (lambda kwargs: log_prob(observed, **kwargs))
 
@@ -88,18 +81,24 @@ if __name__ == '__main__':
     sample, log_prob = model(0.3, 0.1, 0.1, 0.05, 0.1, 10000)
     T = 1000
     observed = sample(T)
-    plt.plot(observed); plt.show()
+
     # for i, col in enumerate(states.T):
     #     plt.plot(col, '-', label=f'{i}')
     # plt.legend()
     # plt.show()
     init_diffs = np.random.normal(0, 1, (T - 1, 4))
     print('Sampling')
+    param_name = 'lo_gamma'
+    param_names = ['lo_gamma', 'lo_a', 'lo_mu']
+    inits = {name: 0.0 for name in param_names}
     samples = nuts_sample(log_prob(observed), jax.random.PRNGKey(0),
-                          {'logits_array': init_diffs,
-                           'beta': 0.0}, 100, 10)
-
-    plt.plot(samples['beta'])
+                          {'logits_array': init_diffs} | inits, 200, 1000)
+    init_state = [0.9, 0.08, 0.01, 0.01]
+    I = jax.lax.scan(scan_transition, jnp.array(init_state), samples['logits_array'][-1])[1][:, 1]
+    plt.plot(observed);
+    plt.plot(I*10000);
     plt.show()
-    plt.hist(samples['beta'])
-    plt.show()
+    for name in param_names:
+        plt.hist(expit(samples[name]))
+        plt.title(name)
+        plt.show()
