@@ -56,19 +56,16 @@ def model(beta, gamma, a, mu, scale, reporting_rate):
         diffs = [s * expit(p) for s, p in zip(state, logits)]
         return [state[i] - diffs[i] + diffs[i - 1] for i in range(4)]
 
-
-
     def sample(T):
         state = init_state
-        #states = [state]
         I = []
         for t in range(T - 1):
             state = transition(state)
             I.append(state[2])
         return s_stats.poisson(np.array(I)*reporting_rate).rvs()
-        # return jnp.array(states)
 
-    def log_prob(observed, logits_array, lo_gamma, lo_a, lo_mu):
+    def log_prob(observed, logits_array, lo_gamma, lo_a, lo_mu, beta, logscale):
+        scale = jnp.exp(logscale)
         E, I = jax.lax.scan(scan_transition, jnp.array(init_state), logits_array)[1].T
         state_pdf = sum(stats.logistic.logpdf(column, param, scale).sum()
                         for column, param in zip(logits_array.T,
@@ -89,7 +86,7 @@ if __name__ == '__main__':
     init_diffs = np.random.normal(0, 1, (T - 1, 4))
     print('Sampling')
     param_name = 'lo_gamma'
-    param_names = ['lo_gamma', 'lo_a', 'lo_mu']
+    param_names = ['lo_gamma', 'lo_a', 'lo_mu', 'beta', 'logscale']
     inits = {name: 0.0 for name in param_names}
     samples = nuts_sample(log_prob(observed), jax.random.PRNGKey(0),
                           {'logits_array': init_diffs} | inits, 200, 1000)
