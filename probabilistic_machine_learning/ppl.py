@@ -21,6 +21,18 @@ def given(*events):
     return Given(events)
 
 
+def get_dist(variable):
+    if hasattr(variable, 'log_prob'):
+        return variable
+    return getattr(dist_backend, type(variable).__name__)
+
+
+def instanciate_dist(variable):
+    if hasattr(variable, 'log_prob'):
+        return variable
+    return get_dist(variable)(*variable.args, **variable.kwargs)
+
+
 class Graph:
 
     def __init__(self, events, given_events=None, variables=None):
@@ -40,7 +52,7 @@ class Graph:
     @classmethod
     def from_variables(cls, variables):
         return cls([], [], variables)
-
+nn
     @classmethod
     def from_events(cls, events, given_events=None):
         return cls(events, given_events)
@@ -53,11 +65,8 @@ class Graph:
         value = event.value
         if isinstance(variable, FunctionNode):
             variable, value = self._get_inverse(variable, value)
-        dist = self.get_dist(variable)(*variable.args, **variable.kwargs)
+        dist = instanciate_dist(variable)
         return dist.log_prob(value)
-
-    def get_dist(self, variable):
-        return getattr(dist_backend, type(variable).__name__)
 
     def _get_inverse(self, variable: FunctionNode, value):
         transformation, root_distribution = self._get_transformation(variable)
@@ -130,7 +139,7 @@ class Graph:
             sampled_kwargs = {key: self._sample(value, shape) for key, value in variable.kwargs.items()}
             self._seed, new_seed = jax.random.split(self._seed)
             #is_basal = all(not self._is_realized(arg) for arg in variable.args) and all(not self._is_realized(value) for value in variable.kwargs.values())
-            dist = self.get_dist(variable)(*sampled_args, **sampled_kwargs)
+            dist = get_dist(variable)(*sampled_args, **sampled_kwargs)
             sample_shape = () if shape == dist.batch_shape else shape
             result = dist.sample(sample_shape=sample_shape, seed=new_seed)
             self.realize(variable, result)

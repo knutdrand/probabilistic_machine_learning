@@ -1,4 +1,4 @@
-hypothesis~=6.89.0
+hypothesis~=6.97.0
 numpy~=1.24.3
 pytest~=7.4.0
 arviz~=0.16.0
@@ -12,3 +12,13 @@ pymc~=5.6.1
 pandas~=2.1.4
 xarray~=2023.6.0
 jax~=0.4.16
+
+bionumpy~=1.0.1
+scikit-learn~=1.4.0
+pydantic~=2.6.1
+
+aesara~=2.9.3
+aeppl~=0.1.5
+oryx~=0.2.5
+blackjax~=1.1.0
+distrax~=0.1.5

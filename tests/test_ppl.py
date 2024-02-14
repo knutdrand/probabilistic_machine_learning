@@ -5,6 +5,7 @@ from matplotlib import pyplot as plt
 from scipy.special import logit, expit
 from probabilistic_machine_learning.adaptors.base_adaptor import ModuleWrap
 from probabilistic_machine_learning.ppl import logprob, given, sample
+from probabilistic_machine_learning.time_series import time_series
 
 dists = ModuleWrap()
 
@@ -112,3 +113,15 @@ def model_2():
     new_M = np.exp(dists.Normal(M + m_alpha + m_beta * temp, 1.))
     return M, S, alpha, beta, m_alpha, m_beta, new_M, new_S, temp
 
+def simple_time_series_model():
+    t, (X, ) = time_series(T=10)
+    X[0] = dists.Normal(0, 1)
+    X[t] = dists.Normal(X[t-1], 1)
+    return X
+
+def test_simple_time_series():
+    X = simple_time_series_model()
+    x = np.array([0., 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    lp = logprob(X == x)
+    true_logprob = np.sum(scipy.stats.norm.logpdf(x[1:], x[:-1], 1))+scipy.stats.norm.logpdf(x[0], 0, 1)
+    assert np.allclose(lp, true_logprob)
