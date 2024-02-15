@@ -1,9 +1,5 @@
-# Figure out beta parameters
-# Figure out bSI tempering
-# Write sampler
-# Write logprob with diff-proportions as states
-# Figure out scan
-# Figure out why beta is not converging
+# Include time as covariate in the model
+
 from collections import defaultdict
 
 import pandas as pd
@@ -84,18 +80,14 @@ def model(beta, gamma, a, mu, scale, reporting_rate):
 
     @logger.save
     def sample_logits(state):
-        logits = jnp.array([beta + logit(state[2]), lo_gamma, lo_a, lo_mu])
-        rvs = s_stats.logistic(loc=logits, scale=scale).rvs()
+        loc = get_loc(state[2], beta, lo_a, lo_gamma, lo_mu)
+        rvs = s_stats.logistic(loc=loc, scale=scale).rvs()
         return rvs
 
     @logger.save
     def transition(state):
         logits = sample_logits(state)
-        return apply_diffs(logits, state)
-
-    def apply_diffs(logits, state):
-        diffs = state*expit(logits)
-        return state - diffs + jnp.roll(diffs, 1)
+        return scan_transition(state, logits)[0]
 
     def sample(T):
         state = jnp.array(init_state)
@@ -106,13 +98,16 @@ def model(beta, gamma, a, mu, scale, reporting_rate):
         return s_stats.poisson(np.array(I) * reporting_rate).rvs()
 
     def log_prob(observed, logits_array, lo_gamma, lo_a=lo_a, lo_mu=np.log(mu), beta=beta, logscale=np.log(scale)):
-        scale = jnp.exp(logscale)
+        prior_pdf = sum(stats.norm.logpdf(param, 0, 10) for param in (lo_gamma, lo_a, lo_mu, beta, logscale))
         S, E, I, R = jax.lax.scan(scan_transition, jnp.array(init_state), logits_array)[1].T
-        loc = [beta + logit(I)[:-1], lo_gamma, lo_a, lo_mu]
-        state_pdf = sum(stats.logistic.logpdf(column[1:], loc=param, scale=scale).sum()
+        loc = get_loc(I[:-1], beta, lo_a, lo_gamma, lo_mu)
+        state_pdf = sum(stats.logistic.logpdf(column[1:], loc=param, scale=jnp.exp(logscale)).sum()
                         for column, param in zip(logits_array.T, loc))
 
-        return state_pdf + stats.poisson.logpmf(observed, I * reporting_rate).sum()
+        return state_pdf + stats.poisson.logpmf(observed, I * reporting_rate).sum()+prior_pdf
+
+    def get_loc(I, beta, lo_a, lo_gamma, lo_mu):
+        return [beta + logit(I), lo_gamma, lo_a, lo_mu]
 
     def recontstruct_state(logits_array):
         return jax.lax.scan(scan_transition, jnp.array(init_state), logits_array)[1]
@@ -122,7 +117,7 @@ def model(beta, gamma, a, mu, scale, reporting_rate):
 
 
 def main():
-    param_names = ['lo_gamma']
+    param_names = ['lo_gamma', 'lo_mu', 'lo_a', 'lo_mu', 'logscale', 'beta']
     real_params = {'beta': 0.3, 'lo_gamma': logit(0.1), 'lo_a': logit(0.1), 'lo_mu': logit(0.05), 'logscale': np.log(0.1)}
     reporting_rate = 10000
     sample, log_prob, reconstruct_state = model(0.3, 0.1, 0.1, 0.05, 0.1, reporting_rate)
