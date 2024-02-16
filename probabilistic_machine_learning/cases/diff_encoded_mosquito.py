@@ -19,10 +19,12 @@ def diff_encoded_model(transition, init_state, observation_dist, diff_dist):
         state = jnp.array(init_state)
         dist = diff_dist(state, params, exogenous)
         if isinstance(dist, tuple):
-            diff_sampler = lambda t_key: jnp.array([d.sample(k) for d, k in zip(dist, jax.random.split(t_key, len(dist)))])
+            N = len(dist)
+            sample_transition = lambda state, t_key: transition(state, jnp.array([d.sample(k) for d, k in
+                                                                                  zip(diff_dist(state, params),
+                                                                                      jax.random.split(t_key, N))]))
         else:
-            diff_sampler = dist.sample
-        sample_transition = lambda state, key: transition(state, diff_dist(state, params).sample(key))
+            sample_transition = lambda state, key: transition(state, diff_dist(state, params).sample(key))
         state = jax.lax.scan(sample_transition, state, jax.random.split(transition_key, T - 1))[1]
         return observation_dist(state).sample(observation_key)
 
@@ -80,7 +82,7 @@ Logisitic = Distribution(loc_scale_warp(jax.random.logistic), stats.logistic.log
 
 
 def refactor_model(param_dict):
-    def diff_dist(state, P=param_dict):
+    def diff_dist(state, P=param_dict,exogenous=None):
         P = {k: P[k] if k in P else param_dict[k] for k in param_dict}
         loc = [P['beta'] + logit(state[..., 2]), P['lo_gamma'], P['lo_a'], P['lo_mu']]
         return tuple(Logisitic(l, jnp.exp(P['logscale'])) for l in loc)
@@ -103,7 +105,7 @@ def simple_model(reporting_rate=10000, logscale=jnp.log(0.1)):
     lo_gamma, lo_a, lo_mu = (logit(p) for p in (0.1, 0.1, 0.05))
 
     def diff_dist(state, P, exogenous=None):
-        return Logisitic(loc=P['beta']+jnp.log(state[..., 2]), scale=jnp.exp(logscale))
+        return Logisitic(loc=P['beta'] + jnp.log(state[..., 2]), scale=jnp.exp(logscale))
 
     def observation_dist(state, P=None):
         return Poisson(state[..., 2] * reporting_rate)
@@ -118,39 +120,40 @@ def simple_model(reporting_rate=10000, logscale=jnp.log(0.1)):
 
 
 def check_big_model():
-    global sample, log_prob, T, name
     param_names = ['lo_gamma', 'lo_mu', 'lo_a', 'lo_mu', 'beta']
     real_params = {'beta': 0.3, 'lo_gamma': logit(0.1), 'lo_a': logit(0.1), 'lo_mu': logit(0.05),
                    'logscale': np.log(0.1), 'reporting_rate': 10000}
     sample, log_prob, reconstruct_state = refactor_model(real_params)
-    T = 1000
-    observed = sample(T, jax.random.PRNGKey(100))
+    T = 100
+    observed = sample(T, jax.random.PRNGKey(100), real_params)
     init_diffs = np.random.normal(0, 1, (T - 1, 4))
     inits = {name: 0.0 for name in param_names}
     init_dict = {'logits_array': init_diffs} | inits
     log_prob(observed)(init_dict)
     samples = nuts_sample(log_prob(observed), jax.random.PRNGKey(0),
-                          init_dict, 1000, 1000)
+                          init_dict, 100, 100)
     plt.plot(observed / real_params['reporting_rate'], label='observed')
     states = reconstruct_state(samples['logits_array'][-1])[:, 2]
     plt.plot(states, label='reconstructed')
     for i in range(1, 1000, 100):
         new_params = {k: samples[k][i] if k in samples else real_params[k] for k in real_params}
         new_sample, *_ = refactor_model(new_params)
-        new_observed = new_sample(T, jax.random.PRNGKey(i))
+        new_observed = new_sample(T, jax.random.PRNGKey(i), new_params)
         plt.plot(new_observed / real_params['reporting_rate'], label='new_observed{}'.format(i), color='grey')
     for key in [200, 2000, 50, 99999]:
-        alt_observed = sample(T, jax.random.PRNGKey(key))
+        alt_observed = sample(T, jax.random.PRNGKey(key), real_params)
         plt.plot(alt_observed / real_params['reporting_rate'], label='alt_observed{}'.format(key), color='blue')
     plt.legend()
     plt.show()
+
 
 def model_evaluation_plot(sample_func, real_params, sampled_params):
     reporting_rate = 10000
     T = 100
     n_samples = len(sampled_params[list(real_params)[0]])
-    for i in range(1, n_samples, n_samples//10):
-        new_observed = sample_func(T, jax.random.PRNGKey(i), {param_name: sampled_params[param_name][i] for param_name in real_params})
+    for i in range(1, n_samples, n_samples // 10):
+        new_observed = sample_func(T, jax.random.PRNGKey(i),
+                                   {param_name: sampled_params[param_name][i] for param_name in real_params})
         plt.plot(new_observed / reporting_rate, label='new_observed{}'.format(i), color='grey')
     for key in [200, 2000, 50, 99999]:
         alt_observed = sample_func(T, jax.random.PRNGKey(key), real_params)
@@ -174,17 +177,19 @@ def check_small_model():
     print(log_prob(observed)(init_dict))
     print(jax.grad(log_prob(observed))(init_dict))
     samples = nuts_sample(log_prob(observed), jax.random.PRNGKey(0),
-                            init_dict, 200, 100)
+                          init_dict, 200, 100)
     debug_logprob(log_prob(observed), samples)
     model_evaluation_plot(sample, real_params, samples)
-    plt.plot(samples['beta'], label='beta');plt.show()
-    plt.plot(observed/10000, label='observed')
+    plt.plot(samples['beta'], label='beta');
+    plt.show()
+    plt.plot(observed / 10000, label='observed')
     last_diffs = samples['logits_array'][-1]
     states = reconstruct_state(last_diffs)[..., 2]
     plt.plot(states, label='reconstructed')
     plt.legend()
     plt.show()
 
+
 if __name__ == '__main__':
-    check_small_model()
-    #check_big_model()
+    # check_small_model()
+    check_big_model()
