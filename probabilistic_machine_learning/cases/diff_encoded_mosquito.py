@@ -22,7 +22,7 @@ def diff_encoded_model(transition, init_state, observation_dist, diff_dist):
             diff_sampler = lambda t_key: jnp.array([d.sample(k) for d, k in zip(dist, jax.random.split(t_key, len(dist)))])
         else:
             diff_sampler = dist.sample
-        sample_transition = lambda state, key: transition(state, diff_sampler(key))
+        sample_transition = lambda state, key: transition(state, diff_dist(state, params).sample(key))
         state = jax.lax.scan(sample_transition, state, jax.random.split(transition_key, T - 1))[1]
         return observation_dist(state).sample(observation_key)
 
