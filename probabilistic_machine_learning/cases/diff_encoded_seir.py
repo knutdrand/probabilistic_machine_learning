@@ -74,34 +74,50 @@ class Register:
 logger = Register()
 
 
+def loc_scale_warp(dist):
+    return lambda loc, scale, *args, **kwargs: loc+scale*dist(*args, **kwargs)
+
+logisitc_sample = loc_scale_warp(jax.random.logistic)
+
+
+
+
 def model(beta, gamma, a, mu, scale, reporting_rate):
     init_state = [0.9, 0.08, 0.01, 0.01]
     lo_gamma, lo_a, lo_mu = (logit(p) for p in (gamma, a, mu))
 
     @logger.save
-    def sample_logits(state):
+    def _sample_logits(state):
         loc = get_loc(state[2], beta, lo_a, lo_gamma, lo_mu)
         rvs = s_stats.logistic(loc=loc, scale=scale).rvs()
         return rvs
 
+    def sample_diff(state, key):
+        loc = get_loc(state[2], beta, lo_a, lo_gamma, lo_mu)
+        return logisitc_sample(jnp.array(loc), scale, key)
+
     @logger.save
-    def transition(state):
+    def _transition(state):
         logits = sample_logits(state)
         return scan_transition(state, logits)[0]
 
-    def sample(T):
+    def scan_transition(state, logits):
+        diffs = state * expit(logits)
+        new_state = state - diffs + jnp.roll(diffs, 1)
+        return new_state, new_state[2]
+
+    def sample(T, key = jax.random.PRNGKey(0)):
         state = jnp.array(init_state)
-        I = []
-        for t in range(T - 1):
-            state = transition(state)
-            I.append(state[2])
-        return s_stats.poisson(np.array(I) * reporting_rate).rvs()
+        sample_transition = lambda state, key: scan_transition(state, sample_diff(state, key))
+        I = jax.lax.scan(sample_transition, state, jax.random.split(key, T-1))[1]
+        return s_stats.poisson(I * reporting_rate).rvs()
 
     def log_prob(observed, logits_array, lo_gamma, lo_a=lo_a, lo_mu=np.log(mu), beta=beta, logscale=np.log(scale)):
         prior_pdf = sum(stats.norm.logpdf(param, 0, 10) for param in (lo_gamma, lo_a, lo_mu, beta, logscale))
-        S, E, I, R = jax.lax.scan(scan_transition, jnp.array(init_state), logits_array)[1].T
-        loc = get_loc(I[:-1], beta, lo_a, lo_gamma, lo_mu)
-        state_pdf = sum(stats.logistic.logpdf(column[1:], loc=param, scale=jnp.exp(logscale)).sum()
+        I = recontstruct_state(logits_array)
+        # I = jax.lax.scan(scan_transition, jnp.array(init_state), logits_array)[1].T
+        loc = get_loc(I, beta, lo_a, lo_gamma, lo_mu)
+        state_pdf = sum(stats.logistic.logpdf(column, loc=param, scale=jnp.exp(logscale)).sum()
                         for column, param in zip(logits_array.T, loc))
 
         return state_pdf + stats.poisson.logpmf(observed, I * reporting_rate).sum()+prior_pdf
@@ -128,12 +144,14 @@ def main():
     inits = {name: 0.0 for name in param_names}
     inits['beta'] = 0.3
     samples = nuts_sample(log_prob(observed), jax.random.PRNGKey(0),
-                          {'logits_array': init_diffs} | inits, 1000, 1000)
+                          {'logits_array': init_diffs} | inits, 100, 100)
+
     plt.plot(observed/reporting_rate, label='observed')
     states = reconstruct_state(samples['logits_array'][-1])
-    plt.plot(states[:, 2], label='reconstructed')
+    plt.plot(states, label='reconstructed')
     plt.legend()
     plt.show()
+    return
     for i in range(4):
         plt.plot(states[:, i], label=f'state {i}')
         plt.plot(logger['transition'][:, i], label=f'transition {i}')
