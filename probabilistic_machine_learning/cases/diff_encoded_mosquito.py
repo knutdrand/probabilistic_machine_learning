@@ -56,7 +56,7 @@ def Distribution(jax_dist, log_prob):
     return Dist
 
 Poisson = Distribution(jax.random.poisson, stats.poisson.logpmf)
-
+Logisitic = Distribution(loc_scale_warp(jax.random.logistic), stats.logistic.logpdf)
 
 def refactor_model(param_dict):
     beta, lo_gamma, lo_a, lo_mu, logscale, reporting_rate = (param_dict[k] for k in (
@@ -67,7 +67,11 @@ def refactor_model(param_dict):
 
     def diff_sampler(state, key):
         loc = get_loc(state)
-        return logistic_sample(jnp.array(loc), jnp.exp(logscale), key)
+        return jnp.array([logistic_sample(l, jnp.exp(logscale), k) for l, k in zip(loc, jax.random.split(key, len(loc)))])
+
+    def diff_dist(state):
+        loc = get_loc(state)
+        return tuple(Logisitic(l, jnp.exp(logscale)) for l in loc)
 
     def diff_prob(state, logits_array, P):
         loc = get_loc(state, P)
