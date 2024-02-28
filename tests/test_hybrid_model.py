@@ -5,7 +5,7 @@ import pytest
 from numpy.testing import assert_array_equal, assert_allclose
 import jax
 
-from probabilistic_machine_learning.cases.diff_model import MosquitoModelSpec, multilogit, inverse_multilogit
+from probabilistic_machine_learning.cases.diff_model import MosquitoModelSpec, multilogit, inverse_multilogit, DiffModel
 
 from probabilistic_machine_learning.cases.hybrid_model import HybridModel, decoupled_scan, discrepancy_logprob
 
@@ -108,3 +108,30 @@ def test_state_tranform(model_spec):
     t_state = model_spec.state_transform(state)
     new_state = model_spec.inverse_state_transform(t_state)
     assert_allclose(new_state, state, rtol=1e-5)
+
+def test_2dstate_tranform(model_spec):
+    state = np.array([model_spec.init_state]*2)
+    t_state = model_spec.state_transform(state)
+    new_state = model_spec.inverse_state_transform(t_state)
+    assert_allclose(new_state, state, rtol=1e-5)
+
+
+@pytest.fixture
+def logprob_data(model_spec):
+    P = MosquitoModelSpec.good_params
+    T = 6
+    P['logits_array'] = np.random.normal(size=(T * 10)).reshape((T, 10))
+    P['transformed_states'] = np.random.normal(size=(2 * 9)).reshape((2, 9))
+    observed = np.random.normal(size=T)
+    exogenous = np.random.normal(size=T)
+    return observed, P, exogenous, model_spec
+
+def test_diff_logprob_acceptance(logprob_data):
+    observed, P, exogenous, model_spec = logprob_data
+    model = DiffModel(MosquitoModelSpec)
+    res = model.log_prob(observed, P, exogenous)
+
+def test_hybrid_logprob_acceptance(logprob_data):
+    observed, P, exogenous, model_spec = logprob_data
+    model = HybridModel(MosquitoModelSpec)
+    res = model.log_prob(observed, P, exogenous)
