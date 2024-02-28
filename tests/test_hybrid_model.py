@@ -5,7 +5,7 @@ import pytest
 from numpy.testing import assert_array_equal, assert_allclose
 import jax
 
-from probabilistic_machine_learning.cases.diff_model import MosquitoModelSpec
+from probabilistic_machine_learning.cases.diff_model import MosquitoModelSpec, multilogit, inverse_multilogit
 
 from probabilistic_machine_learning.cases.hybrid_model import HybridModel, decoupled_scan, discrepancy_logprob
 
@@ -88,9 +88,23 @@ def discrepancy_data():
     new_states = np.array([[2., 10., 1.], [3., 10., 1.]])
     return calc_states, new_states
 
+
 def test_discrepancy_logprob(discrepancy_data):
     calc_states, new_states = discrepancy_data
     inverse_transform = lambda x: x
     res = discrepancy_logprob(calc_states, new_states, new_states[0], inverse_transform)
     assert res.shape == ()
 
+
+def test_multilogit_inverse():
+    state = np.array([0.3, 0.2, 0.5])
+    t_state = multilogit(state)
+    new_state = inverse_multilogit(t_state)
+    assert_allclose(new_state, state, rtol=1e-5)
+
+
+def test_state_tranform(model_spec):
+    state = model_spec.init_state
+    t_state = model_spec.state_transform(state)
+    new_state = model_spec.inverse_state_transform(t_state)
+    assert_allclose(new_state, state, rtol=1e-5)
