@@ -13,11 +13,29 @@ from probabilistic_machine_learning.adaptors.jax_nuts import sample as nuts_samp
 from functools import wraps, partial
 
 
-def diff_encoded_model(transition, init_state, observation_dist, diff_dist):
+def mosquito_infection_rate_func(P, human_infected):
+    infection_rate = jnp.log(human_infected) * P['infection_rate_slope'] + P['base_infection_rate']
+    return infection_rate
+
+def new_mosquito_infection_rate_func(P, human_infected):
+    infection_rate = logit(human_infected) * P['infection_rate_slope'] + P['base_infection_rate']
+    return infection_rate
+
+
+def get_death_rate(alpha, beta, population_size):
+    return expit(alpha + beta * population_size) * 0.7
+
+def get_maturation_rate_by_temp(P, temp):
+    return expit(P['temp_base'] + P['temp_dependency'] * temp)
+
+
+
+
+def full_diff_encoded_model(transition, init_state, observation_dist, diff_dist, offsets=None):
     def sampler(T, key=jax.random.PRNGKey(0), params=None, exogenous=None):
         observation_key, transition_key = jax.random.split(key)
         state = jnp.array(init_state)
-        dist = diff_dist(state, params, exogenous)
+        dist = diff_dist(state, params, exogenous[0] if exogenous is not None else None)
 
         def exogenous_sample(state, values):
             key, exog = values
@@ -38,11 +56,43 @@ def diff_encoded_model(transition, init_state, observation_dist, diff_dist):
             values = (values, exogenous)
 
         state = jax.lax.scan(sample_transition, state, values)[1]
+        if False:
+            for i in range(4, len(state.T)):
+                plt.plot(state[:, i], label=str(i))
+            plt.legend()
+            plt.show()
+            for i in range(4):
+                plt.plot(state[:, i], label=str(i))
+            plt.legend()
+            plt.show()
+
         return observation_dist(state, params).sample(observation_key)
 
     def recontstruct_state(logits_array, params=None):
         new_transition = partial(transition, P=params)
         return jax.lax.scan(new_transition, jnp.array(init_state), logits_array)[1]
+
+    def sample_diffs(transition_key=jax.random.PRNGKey(0), params=None, exogenous=None):
+        state = jnp.array(init_state)
+        dist = diff_dist(state, params, exogenous[0] if exogenous is not None else None)
+
+        def exogenous_sample(state, values):
+            key, exog = values
+            diff = diff_dist(state, params, exog).sample(key)
+            return transition(state, diff, params)[0], diff
+
+        values = jax.random.split(transition_key, len(exogenous))
+
+        sample_transition = exogenous_sample
+        values = (values, exogenous)
+
+        state = jax.lax.scan(sample_transition, state, values)[1]
+        return state
+
+    def _accumulate_states(states):
+        if offsets is None:
+            return offsets
+        return jnp.cumsum(states, axis=0)[offsets].diff(axis=0)
 
     def log_prob(observed, P, exogenous=None):
         diffs = P['logits_array']
@@ -54,9 +104,15 @@ def diff_encoded_model(transition, init_state, observation_dist, diff_dist):
         else:
             state_pdf = d_dist.log_prob(diffs[1:]).sum()
             init_pdf = diff_dist(init_state, P, exogenous[0]).log_prob(diffs[0]).sum()
-        return state_pdf + observation_dist(state, P).log_prob(observed).sum() + init_pdf
+        observed_pdf = observation_dist(state, P).log_prob(observed)
+        return state_pdf + observed_pdf.sum() + init_pdf
 
-    return sampler, lambda observed, exogenous=None: (lambda kwargs: log_prob(observed, kwargs, exogenous)), recontstruct_state
+    lp_func = lambda observed, exogenous=None: (lambda kwargs: log_prob(observed, kwargs, exogenous))
+    return sampler, lp_func, recontstruct_state, sample_diffs
+
+
+def diff_encoded_model(*args, **kwargs):
+    return full_diff_encoded_model(*args, **kwargs)[:-1]
 
 
 def loc_scale_warp(dist):
@@ -116,7 +172,7 @@ def simple_model(reporting_rate=10000, logscale=jnp.log(0.1), lo_gamma=logit(0.1
     init_state = jnp.array([0.9, 0.08, 0.01, 0.01])
 
     def diff_dist(state, P, exogenous=None):
-        return Logisitic(loc=P['beta']*exogenous + jnp.log(state[..., 2]), scale=jnp.exp(logscale))
+        return Logisitic(loc=P['beta'] * exogenous + jnp.log(state[..., 2]), scale=jnp.exp(logscale))
 
     def observation_dist(state, P=None):
         return Poisson(state[..., 2] * reporting_rate)
@@ -129,15 +185,18 @@ def simple_model(reporting_rate=10000, logscale=jnp.log(0.1), lo_gamma=logit(0.1
 
     return diff_encoded_model(transition, init_state, observation_dist, diff_dist)
 
+
 def seir_model():
     init_state = jnp.array([0.9, 0.08, 0.01, 0.01])
     params = ['lo_rate', 'logscale', 'beta', 'lo_gamma', 'lo_a', 'lo_mu']
+
     def diff_dist(state, P, exogenous=None):
         beta_diff = P['beta'] * exogenous + jnp.log(state[..., 2])
-        return Logisitic(loc=jnp.array([beta_diff]+ [jnp.full_like(beta_diff, P[p]) for p in params[3:]]).T, scale=jnp.exp(P['logscale']))
+        return Logisitic(loc=jnp.array([beta_diff] + [jnp.full_like(beta_diff, P[p]) for p in params[3:]]).T,
+                         scale=jnp.exp(P['logscale']))
 
     def observation_dist(state, P=None):
-        return Poisson(state[..., 2] * expit(P['lo_rate'])*100_000)
+        return Poisson(state[..., 2] * expit(P['lo_rate']) * 100_000)
 
     def transition(state, logit, P=None):
         logits = jnp.array([logit[0], logit[1], logit[2], logit[3]])
@@ -145,7 +204,7 @@ def seir_model():
         new_state = state - diffs + jnp.roll(diffs, 1)
         return new_state, new_state
 
-    return diff_encoded_model(transition, init_state, observation_dist, diff_dist), (params, len(params)-2)
+    return diff_encoded_model(transition, init_state, observation_dist, diff_dist), (params, len(params) - 2)
 
 
 def check_big_model():
@@ -176,13 +235,14 @@ def check_big_model():
     plt.show()
 
 
-def model_evaluation_plot(sample_func, real_params, sampled_params,temperature):
+def model_evaluation_plot(sample_func, real_params, sampled_params, temperature):
     reporting_rate = 10000
-    T = len(temperature)+1
+    T = len(temperature) + 1
     n_samples = len(sampled_params[list(real_params)[0]])
     for i in range(1, n_samples, n_samples // 10):
         new_observed = sample_func(T, jax.random.PRNGKey(i),
-                                   {param_name: sampled_params[param_name][i] for param_name in real_params}, temperature)
+                                   {param_name: sampled_params[param_name][i] for param_name in real_params},
+                                   temperature)
         plt.plot(new_observed / reporting_rate, label='predicted', color='grey')
     for key in [200, 2000, 50, 99999]:
         alt_observed = sample_func(T, jax.random.PRNGKey(key), real_params, temperature)
@@ -190,7 +250,7 @@ def model_evaluation_plot(sample_func, real_params, sampled_params,temperature):
     # Add description
     plt.title('Prdicted path using estimated parameters vs real parameters')
     plt.legend()
-
+    return plt.gcf()
 
 
 def debug_logprob(log_prob, sampled_parameters):
@@ -203,7 +263,7 @@ def check_small_model():
     real_params = {'beta': 0.5}
     sample, log_prob, reconstruct_state = simple_model()
     T = 100
-    temperature = np.random.normal(1, 1, T-1)
+    temperature = np.random.normal(1, 1, T - 1)
     observed = sample(T, jax.random.PRNGKey(100), real_params, temperature)
     init_diffs = np.random.normal(0, 1, (T - 1))
     init_dict = {'logits_array': init_diffs} | {'beta': 0.0}
@@ -224,6 +284,7 @@ def check_small_model():
     plt.legend()
     plt.show()
 
+
 def mosquito_model():
     init_state = jnp.array([0.9, 0.08, 0.01, 0.01, 100, 100, 100, 100, 100, 100])
     params = ['lo_rate', 'logscale',
@@ -231,13 +292,14 @@ def mosquito_model():
               'alpha', 'beta', 'temp_base', 'temp_dependency',
               'infection_rate_slope', 'base_infection_rate',
               'lo_mosquito_gamma', 'lo_mosquito_a', 'lo_mosquito_mu', 'log_eggrate',
-              'mosquito_death_logit']
+              'mosquito_death_logit', 'carry_beta', 'carry_alpha']
 
     def get_mosquito_maturation_rate(state, temp, P):
-        maturation_level = expit(P['temp_base'] + P['temp_dependency']*temp)
-        infection_rate = state[..., 2]*P['infection_rate_slope']+P['base_infection_rate']
-        return [logit(maturation_level/3), logit(maturation_level/5), infection_rate, P['lo_mosquito_gamma'], P['lo_mosquito_a'], -100000]
-
+        maturation_level = expit(P['temp_base'] + P['temp_dependency'] * temp)
+        human_infected = state[..., 2]
+        infection_rate = mosquito_infection_rate_func(P, human_infected)
+        return [logit(maturation_level / 3), logit(maturation_level / 5), infection_rate, P['lo_mosquito_gamma'],
+                P['lo_mosquito_a'], -100000]
 
 
     def get_human_params(state, P):
@@ -253,95 +315,170 @@ def mosquito_model():
         return Logisitic(loc=jnp.array(params).T, scale=jnp.exp(P['logscale']))
 
     def observation_dist(state, P=None):
-        return Poisson(state[..., 2] * expit(P['lo_rate'])*100_000)
+        return Poisson(state[..., 2] * expit(P['lo_rate']) * 100_000)
 
     def transition(states, logit, P):
         diffs = states * expit(logit)
         human_state, mosquito_state = states[..., :4], states[..., 4:]
-        human_diffs = human_state* expit(logit[:4])
-        mosquito_state = mosquito_state * (1-expit(P['mosquito_death_logit']))
+        human_diffs = human_state * expit(logit[:4])
+        mosquito_state = mosquito_state * (1 - expit(P['mosquito_death_logit']))
+        carry_deaths = expit(P['carry_beta'] + P['carry_alpha'] * mosquito_state[..., 1]) * 0.7
+        mosquito_state = jnp.concatenate(
+            [mosquito_state[..., 0:1], mosquito_state[..., 1:2] * (1 - carry_deaths), mosquito_state[..., 2:]])
         mosquito_diffs = mosquito_state * expit(logit[4:])
         new_state = human_state - human_diffs + jnp.roll(human_diffs, 1)
-        new_eggs = jnp.exp(P['log_eggrate'])*jnp.sum(mosquito_state[..., 3:], axis=-1)
+        new_eggs = jnp.exp(P['log_eggrate']) * jnp.sum(mosquito_state[..., 3:], axis=-1)
         new_mosquito_state = mosquito_state - mosquito_diffs + jnp.roll(mosquito_diffs, 1)
-        new_state = jnp.concatenate([new_state, new_mosquito_state[0:1]+new_eggs, new_mosquito_state[1:]])
+        new_state = jnp.concatenate([new_state, new_mosquito_state[0:1] + new_eggs, new_mosquito_state[1:]])
         return new_state, new_state
 
     n_states = 10
-    assert diff_dist(jnp.zeros(n_states), {k: 0.0 for k in params}, 1).sample(jax.random.PRNGKey(0)).shape == (n_states,)
+    assert diff_dist(jnp.zeros(n_states), {k: 0.0 for k in params}, 1).sample(jax.random.PRNGKey(0)).shape == (
+        n_states,)
     diff_dist(jnp.zeros((3, n_states)), {k: 0.0 for k in params}, np.ones(3))
     assert transition(jnp.ones(n_states), jnp.zeros(n_states), {k: 0.0 for k in params})[0].shape == (n_states,)
     return diff_encoded_model(transition, init_state, observation_dist, diff_dist), (params, n_states)
 
 
+def pure_mosquito_model():
+    state_names = ['eggs', 'larvae', 'pupae', 'mosquitoes']
+    init_state = jnp.array([100., 100., 100., 100.])
+    params = ['temp_base', 'temp_dependency', 'lo_pupae_maturation', 'logscale', 'mosquito_death_logit', 'carry_beta',
+              'carry_alpha', 'log_eggrate', 'lo_rate']
+    prior_values = {'temp_base': logit(0.00001),
+                    'temp_dependency': 0.5,
+                    'lo_pupae_maturation': 0.33,
+                    'logscale': np.log(1.),
+                    'mosquito_death_logit': logit(0.05),
+                    'carry_beta': logit(0.0002),
+                    'carry_alpha': 0.005,
+                    'log_eggrate': jnp.log(1000),
+                    'lo_rate': 0
+                    }
 
-    @staticmethod
-    def d_mosquito(state, death_rate, maturation_rate, beta, alpha, egglaying_rate):
-        deaths = -death_rate * state
-        maturation = (state + deaths) * maturation_rate
-        carry_deaths = expit(beta + alpha * state[..., 1])*0.7
-        d = jnp.array([deaths[..., 0] - maturation[..., 0] + egglaying_rate * state[..., 3:].sum(),
-                       deaths[..., 1] + maturation[..., 0] - carry_deaths * (state[..., 1] + deaths[..., 1])-maturation[..., 1]*(1-carry_deaths),
-                       deaths[..., 2] - maturation[..., 2] + maturation[..., 1]*(1-carry_deaths),
-                       deaths[..., 3] + maturation[..., 2],
-                       deaths[..., 4] + maturation[..., 3] - maturation[..., 4],
-                       deaths[..., 5] + maturation[..., 4]]).T
-        return d
+    def get_mosquito_maturation_rate(temp, P):
+        maturation_level = get_maturation_rate_by_temp(P, temp)
+        return [logit(maturation_level / 3), logit(maturation_level / 5), P['lo_pupae_maturation'], 0]
 
-    def sample(self):
-        observed = []
-        state = np.array([0.25, 0.25, 0.25, 0.25])
-        mosquito_state = np.full(6, 2000.0)
-        mosquito_states = [mosquito_state.copy()]
-        human_states = [state.copy()]
-        case_counts = [np.random.poisson(state[2]*self.multiplier)]
-        for t in range(self.T):
-            mosquito_state, state = self.transition_function(mosquito_state, state, t)
-            mosquito_states.append(mosquito_state.copy())
-            human_states.append(state.copy())
-            case_counts.append(np.random.poisson(state[2]*self.multiplier))
-            fullstate = np.concatenate([state, mosquito_state])
-            observed.append(fullstate)
-        full_data = observed
-        observed = np.array(case_counts)
-        return np.array(full_data), observed
-
-    def transition_function(self, mosquito_state, state, t):
-        temp = self.temperature[t]
-        logit_beta = np.random.normal(self.alpha + self.beta * mosquito_state[-1], self.sigma)
-        beta = expit(logit_beta)
-        d_human = self.d_human(state, [beta] + self.seir_params)
-        d_mosquito = self.get_mosquito_update(mosquito_state, state, temp)
-        state = state + d_human
-        mosquito_state = mosquito_state + d_mosquito
-        return mosquito_state, state
+    def get_mosquito_death_rate(mosquito_state, P):
+        alpha = P['carry_alpha']
+        beta = P['carry_beta']
+        population_size = mosquito_state[..., 1]
+        larva_death = get_death_rate(alpha, beta, population_size)
+        return [P['mosquito_death_logit'], logit(larva_death), P['mosquito_death_logit'], P['mosquito_death_logit']]
 
 
 
-    def get_mosquito_update(self, mosquito_state, state, temp):
-        maturation_rate = self.maturation.copy()
-        logit_dependent = logit(maturation_rate[0]) + self.t_beta * temp  # , self.sigma)
-        eta = np.random.normal(logit_dependent, self.sigma)
-        temp_dependent = expit(eta)
-        maturation_rate[0] = temp_dependent / 3
-        maturation_rate[1] = temp_dependent / 5
-        logit_rate = logit(maturation_rate[3]) + self.h_beta * state[-2]
-        maturation_rate[3] = expit(logit_rate)
-        d_mosquito = self.d_mosquito(mosquito_state, self.death_rate, maturation_rate, self.m_beta, self.m_alpha, 0.7)
-        return d_mosquito
+    def diff_dist(state, P, exogenous=None):
+        mosquito_params = get_mosquito_maturation_rate(exogenous, P)
+        param_array = jnp.array(jnp.broadcast_arrays(*mosquito_params)).T
+        scale = jnp.exp(P['logscale'])
+        return Logisitic(loc=param_array, scale=scale)
 
-    def d_human(human_state, seir_params):
-        beta, gamma, mu, a = seir_params
-        n_mu = (1-mu)
-        S, E, I, R = human_state
-        d = np.array(
-            [FixedMosquitoModel.get_s_diff_func(S, mu)(beta),# mu - mu * S - beta * S,
-             beta * S - (mu + a * n_mu) * E,
-             a * E - (mu + gamma * n_mu) * I,
-             gamma * I - mu * R])
-        return d
+    def transition(states, logits, P):
+        death_rates = jnp.array(get_mosquito_death_rate(states, P))
+        mosquito_state = states * (1 - expit(death_rates))
+        mosquito_diffs = mosquito_state * expit(logits)
+        new_state = jnp.array([mosquito_state[0] - mosquito_diffs[0] + jnp.exp(P['log_eggrate']) * mosquito_diffs[-1],
+                               mosquito_state[1] - mosquito_diffs[1] + mosquito_diffs[0],
+                               mosquito_state[2] - mosquito_diffs[2] + mosquito_diffs[1],
+                               mosquito_state[3] + mosquito_diffs[2]])
+        return new_state, new_state
+
+    def observation_dist(state, P=None):
+        return Poisson(state[..., 2] * expit(P['lo_rate'])+1.)
+
+    n_states = len(state_names)
+    assert diff_dist(jnp.zeros(n_states), {k: 0.0 for k in params}, 1).sample(jax.random.PRNGKey(0)).shape == (
+        n_states,)
+    return diff_encoded_model(transition, init_state, observation_dist, diff_dist), (prior_values, len(state_names))
+
+
+
+def full_model():
+    state_names = ['eggs', 'larvae', 'pupae', 'mosquitoes', 'exposed_mosquitos', 'infected_mosquitos',
+                   'susceptible_humans', 'exposed_humans', 'infected_humans', 'recovered_humans']
+    init_state = jnp.array([0.88, 0.1, 0.01, 0.01, 100., 100., 100., 100., 10., 10.])
+    params = ['temp_base', 'temp_dependency', 'lo_pupae_maturation', 'logscale', 'mosquito_death_logit', 'carry_beta',
+              'carry_alpha', 'log_eggrate', 'lo_rate',
+                'lo_gamma', 'lo_a', 'lo_mu', 'alpha', 'beta', 'infection_rate_slope', 'base_infection_rate', 'lo_mosqutito_beta',
+                'lo_mosquito_gamma']
+    prior_values = {
+        'temp_base': -30.,
+    'temp_dependency': 1.,
+    'lo_pupae_maturation': logit(0.33),
+    'logscale': np.log(0.1),
+    'mosquito_death_logit': logit(0.1),
+    'carry_beta': 0.01,  # Verified
+    'carry_alpha': -10.0,  # Verified
+    'log_eggrate': jnp.log(10),
+    'log_rate': jnp.log(100000),
+    'lo_gamma': logit(0.1),
+    'lo_a': logit(0.1),
+    'lo_mu': logit(0.05),
+    'alpha': logit(0.0001),
+    'beta': 0.5,
+    'infection_rate_slope': 0.5,
+    'base_infection_rate': logit(0.01),
+    'lo_mosqutito_beta': logit(0.2),
+    'lo_mosquito_gamma': logit(1/7),
+    }
+
+    def get_mosquito_maturation_rate(temp, P, human_I):
+        infection_rate = mosquito_infection_rate_func(P, human_I)
+        maturation_level = get_maturation_rate_by_temp(P, temp)
+        return [logit(maturation_level / 3), logit(maturation_level / 5),
+                P['lo_pupae_maturation'], P['lo_mosqutito_beta']*human_I, P['lo_mosquito_gamma'], 0]
+
+
+    def get_mosquito_death_rate(mosquito_state, P):
+        alpha = P['carry_alpha']
+        beta = P['carry_beta']
+        population_size = mosquito_state[..., 1]
+        larva_death = get_death_rate(alpha, beta, population_size)
+        return [P['mosquito_death_logit'], logit(larva_death), P['mosquito_death_logit'], P['mosquito_death_logit'],
+                P['mosquito_death_logit'], P['mosquito_death_logit']]
+
+    def get_human_params(P, mosquito_I):
+        beta_diff = P['alpha'] + P['beta'] * jnp.log(mosquito_I)
+        return [beta_diff] + [P[p] for p in ['lo_gamma', 'lo_a', 'lo_mu']]
+
+    def diff_dist(state, P, exogenous=None):
+        mosquito_params = get_mosquito_maturation_rate(exogenous, P, state[..., 2])
+        human_params = get_human_params(P, state[..., -1])
+        param_array = jnp.array(jnp.broadcast_arrays(*(human_params+mosquito_params))).T
+        scale = jnp.exp(P['logscale'])
+        return Logisitic(loc=param_array, scale=scale)
+
+    def transition(states, logits, P):
+        human_state, mosquito_state = states[..., :4], states[..., 4:]
+        human_logits = logits[:4]
+        human_diffs = human_state * expit(human_logits)
+        death_rates = jnp.array(get_mosquito_death_rate(mosquito_state, P))
+        mosquito_state = mosquito_state * (1 - expit(death_rates))
+        mosquito_logits = logits[4:]
+        mosquito_diffs = mosquito_state * expit(mosquito_logits)
+        new_eggs = jnp.exp(P['log_eggrate']) * jnp.sum(mosquito_state[..., 3:], axis=-1)*expit(mosquito_logits[-1])
+        new_state = human_state - human_diffs + jnp.roll(human_diffs, 1)
+        new_state = jnp.array([new_state[0], new_state[1], new_state[2], new_state[3],
+                               mosquito_state[0] - mosquito_diffs[0] + new_eggs,
+                               mosquito_state[1] - mosquito_diffs[1] + mosquito_diffs[0],
+                               mosquito_state[2] - mosquito_diffs[2] + mosquito_diffs[1],
+                               mosquito_state[3] - mosquito_diffs[3] + mosquito_diffs[2],
+                               mosquito_state[4] - mosquito_diffs[4] + mosquito_diffs[3],
+                               mosquito_state[5]  + mosquito_diffs[4]])
+
+        return new_state, new_state
+
+    def observation_dist(state, P=None):
+        return Poisson(state[..., 2] * jnp.exp(P['log_rate'])+1)
+
+    n_states = len(state_names)
+    assert diff_dist(jnp.zeros(n_states), {k: 0.0 for k in params}, 1).sample(jax.random.PRNGKey(0)).shape == (
+        n_states,)
+    return full_diff_encoded_model(transition, init_state, observation_dist, diff_dist), (prior_values, len(state_names))
 
 
 if __name__ == '__main__':
     check_small_model()
-    #check_big_model()
+    # check_big_model()
