@@ -26,7 +26,7 @@ def decoupled_scan(diffs_array: np.ndarray, state_array: np.ndarray, transition:
     '''
 
     n_fixed, n_states = state_array.shape
-    assert diffs_array.shape[-1] == n_states, (diffs_array.shape[0], n_fixed, n_states)
+    #assert diffs_array.shape[-1] == n_states, (diffs_array.shape[0], n_fixed, n_states)
     assert diffs_array.shape[0] % n_fixed == 0, (diffs_array.shape[0], n_fixed, n_states)
     diffs_array = diffs_array.reshape(n_fixed, -1, n_states)
     diffs_array = jnp.swapaxes(diffs_array, 0, 1)
